@@ -1,5 +1,7 @@
 package ru.dimaskama.schematicpreview.render;
 
+import com.mojang.blaze3d.IndexType;
+import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderTarget;
@@ -13,7 +15,6 @@ import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.MeshData;
 import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexSorting;
 import fi.dy.masa.litematica.render.schematic.BlockModelRendererSchematic;
 import fi.dy.masa.litematica.render.schematic.IBlockOutputSchematic;
@@ -31,7 +32,6 @@ import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayerGroup;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
-import net.minecraft.client.renderer.state.GameRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.resources.model.ModelManager;
@@ -46,14 +46,13 @@ import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
-import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import ru.dimaskama.schematicpreview.SchematicPreview;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.Optional;
 import java.util.OptionalDouble;
-import java.util.OptionalInt;
 
 public class SchematicPreviewRenderer implements AutoCloseable {
 
@@ -61,8 +60,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
     private final FluidRenderer fluidRenderer;
     private final ModelManager modelManager;
     private final BlockEntityRenderDispatcher blockEntityRenderManager;
-    private final SubmitNodeStorage orderedRenderCommandQueue;
-    private final CustomVertexConsumerProvider customVertexConsumerProvider;
+    private final SubmitNodeStorage submitNodeStorage;
     private final FeatureRenderDispatcher renderDispatcher;
     private final List<ChunkEntry> chunks = new ArrayList<>();
     private final Vector3f pos = new Vector3f(Float.MIN_VALUE, Float.MIN_VALUE, Float.MIN_VALUE);
@@ -78,18 +76,8 @@ public class SchematicPreviewRenderer implements AutoCloseable {
         modelManager = mc.getModelManager();
         fluidRenderer = new FluidRenderer(modelManager.getFluidStateModelSet());
         blockEntityRenderManager = mc.getBlockEntityRenderDispatcher();
-        orderedRenderCommandQueue = new SubmitNodeStorage();
-        customVertexConsumerProvider = new CustomVertexConsumerProvider(mc.renderBuffers().bufferSource());
-        renderDispatcher = new FeatureRenderDispatcher(
-                orderedRenderCommandQueue,
-                modelManager,
-                customVertexConsumerProvider,
-                mc.getAtlasManager(),
-                new DummyOutlineVertexConsumerProvider(),
-                new DummyVertexConsumerProvider(),
-                mc.font,
-                new GameRenderState()
-        );
+        submitNodeStorage = new SubmitNodeStorage();
+        renderDispatcher = mc.gameRenderer.featureRenderDispatcher();
     }
 
     public void setup(LitematicaSchematic schematic) {
@@ -176,7 +164,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
 
     private ChunkSectionsToRender prepareChunks() {
         Iterator<ChunkEntry> chunkIterator = chunks.iterator();
-        EnumMap<ChunkSectionLayer, Int2ObjectOpenHashMap<List<com.mojang.blaze3d.systems.RenderPass.Draw<GpuBufferSlice[]>>>> enumMap = new EnumMap<>(ChunkSectionLayer.class);
+        EnumMap<ChunkSectionLayer, Int2ObjectOpenHashMap<List<RenderPass.Draw<GpuBufferSlice[]>>>> enumMap = new EnumMap<>(ChunkSectionLayer.class);
         int maxIndices = 0;
 
         for (ChunkSectionLayer chunkSectionLayer : ChunkSectionLayer.values()) {
@@ -212,7 +200,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
                 if (uniformIndex == -1) {
                     uniformIndex = chunkSectionInfos.size();
                     chunkSectionInfos.add(new DynamicUniforms.ChunkSectionInfo(
-                            new Matrix4f(RenderSystem.getModelViewMatrix()),
+                            RenderSystem.getModelViewMatrixCopy(),
                             chunk.pos().getMinBlockX(),
                             0,
                             chunk.pos().getMinBlockZ(),
@@ -223,7 +211,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
                 }
 
                 GpuBuffer indexBuffer;
-                VertexFormat.IndexType indexType;
+                IndexType indexType;
                 if (sectionBuffers.indexBuffer() == null) {
                     if (sectionBuffers.indexCount() > maxIndices) {
                         maxIndices = sectionBuffers.indexCount();
@@ -238,7 +226,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
                 int finalUniformIndex = uniformIndex;
                 enumMap.get(layer)
                         .computeIfAbsent(0, ignored -> new ArrayList<>())
-                        .add(new com.mojang.blaze3d.systems.RenderPass.Draw<>(
+                        .add(new RenderPass.Draw<>(
                                 0,
                                 sectionBuffers.vertexBuffer(),
                                 indexBuffer,
@@ -271,16 +259,16 @@ public class SchematicPreviewRenderer implements AutoCloseable {
     }
 
     private void renderChunkSectionsLayer(ChunkSectionsToRender chunks, ChunkSectionLayerGroup group) {
-        RenderSystem.AutoStorageIndexBuffer autoStorageIndexBuffer = RenderSystem.getSequentialBuffer(VertexFormat.Mode.QUADS);
+        RenderSystem.AutoStorageIndexBuffer autoStorageIndexBuffer = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS);
         GpuBuffer sharedIndexBuffer = chunks.maxIndicesRequired() == 0 ? null : autoStorageIndexBuffer.getBuffer(chunks.maxIndicesRequired());
-        VertexFormat.IndexType sharedIndexType = chunks.maxIndicesRequired() == 0 ? null : autoStorageIndexBuffer.type();
+        IndexType sharedIndexType = chunks.maxIndicesRequired() == 0 ? null : autoStorageIndexBuffer.type();
         Minecraft minecraft = Minecraft.getInstance();
         GpuSampler blockSampler = textureSampler;
 
         try (RenderPass renderPass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
                 () -> "SchematicPreview " + group.label(),
                 target.getColorTextureView(),
-                OptionalInt.empty(),
+                Optional.empty(),
                 target.getDepthTextureView(),
                 OptionalDouble.empty()
         )) {
@@ -311,10 +299,9 @@ public class SchematicPreviewRenderer implements AutoCloseable {
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     public void renderBlockEntities(PoseStack stack, float tickDelta) {
-        if (getBuiltChunksCount() != chunks.size()) {
+        if (target == null || getBuiltChunksCount() != chunks.size()) {
             return;
         }
-        customVertexConsumerProvider.setFramebuffer(target);
         world.getBlockEntities().forEach((pos, blockEntitySupplier) -> {
             BlockEntity blockEntity = blockEntitySupplier.get();
             if (blockEntity != null) {
@@ -325,7 +312,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
                     stack.translate(pos.getX() - this.pos.x, pos.getY() - this.pos.y, pos.getZ() - this.pos.z);
                     try {
                         renderer.extractRenderState(blockEntity, renderState, tickDelta, cameraRenderState.pos, null);
-                        renderer.submit(renderState, stack, orderedRenderCommandQueue, cameraRenderState);
+                        renderer.submit(renderState, stack, submitNodeStorage, cameraRenderState);
                     } catch (Exception e) {
                         SchematicPreview.LOGGER.debug("Exception while rendering preview block entity", e);
                     }
@@ -333,8 +320,16 @@ public class SchematicPreviewRenderer implements AutoCloseable {
                 }
             }
         });
-        renderDispatcher.renderAllFeatures();
-        customVertexConsumerProvider.endBatch();
+        GpuTextureView prevColorOverride = RenderSystem.outputColorTextureOverride;
+        GpuTextureView prevDepthOverride = RenderSystem.outputDepthTextureOverride;
+        RenderSystem.outputColorTextureOverride = target.getColorTextureView();
+        RenderSystem.outputDepthTextureOverride = target.getDepthTextureView();
+        try {
+            renderDispatcher.renderAllFeatures(submitNodeStorage);
+        } finally {
+            RenderSystem.outputColorTextureOverride = prevColorOverride;
+            RenderSystem.outputDepthTextureOverride = prevDepthOverride;
+        }
     }
 
     public int getBuiltChunksCount() {
@@ -353,7 +348,6 @@ public class SchematicPreviewRenderer implements AutoCloseable {
         chunks.clear();
         pos.set(Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE);
         chunkPos = new ChunkPos(Integer.MIN_VALUE, Integer.MIN_VALUE);
-        renderDispatcher.close();
         if (textureSampler != null) {
             textureSampler.close();
             textureSampler = null;
@@ -366,7 +360,7 @@ public class SchematicPreviewRenderer implements AutoCloseable {
             GpuBuffer vertexBuffer,
             GpuBuffer indexBuffer,
             int indexCount,
-            VertexFormat.IndexType indexType
+            IndexType indexType
     ) implements AutoCloseable {
 
         @Override
@@ -445,8 +439,8 @@ public class SchematicPreviewRenderer implements AutoCloseable {
         private BufferBuilder getBuilderByLayer(ChunkSectionLayer layer) {
             return builderCache.computeIfAbsent(layer, ignored -> new BufferBuilder(
                     getAllocatorByLayer(layer),
-                    layer.pipeline().getVertexFormatMode(),
-                    layer.pipeline().getVertexFormat()
+                    layer.pipeline().getPrimitiveTopology(),
+                    layer.vertexFormat()
             ));
         }
 

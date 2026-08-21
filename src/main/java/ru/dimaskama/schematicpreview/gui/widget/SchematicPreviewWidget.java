@@ -1,5 +1,6 @@
 package ru.dimaskama.schematicpreview.gui.widget;
 
+import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.ProjectionType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.Std140Builder;
@@ -14,9 +15,12 @@ import fi.dy.masa.malilib.gui.widgets.WidgetBase;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractWidget;
+import net.minecraft.client.gui.render.GuiRenderer;
 import net.minecraft.client.gui.render.TextureSetup;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
+import net.minecraft.client.renderer.Projection;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.state.gui.BlitRenderState;
@@ -149,9 +153,9 @@ public class SchematicPreviewWidget extends WidgetBase {
         if (nonStatic || framebufferUpdated || renderer.needsReRender()) {
             RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
                     framebuffer.getColorTexture(),
-                    0,
+                    GuiRenderer.CLEAR_COLOR,
                     framebuffer.getDepthTexture(),
-                    1.0
+                    RenderSystem.DEFAULT_DEPTH_CLEAR_VALUE
             );
             renderer.render(framebuffer, tickDelta);
         }
@@ -178,7 +182,7 @@ public class SchematicPreviewWidget extends WidgetBase {
         int scaledWidth = (int) (scale * width);
         int scaledHeight = (int) (scale * height);
         if (framebuffer == null) {
-            framebuffer = new TextureTarget("SchematicPreview", scaledWidth, scaledHeight, true);
+            framebuffer = new TextureTarget("SchematicPreview", scaledWidth, scaledHeight, true, GpuFormat.RGBA8_UNORM);
             return true;
         }
         if (framebuffer.width != scaledWidth || framebuffer.height != scaledHeight) {
@@ -198,10 +202,11 @@ public class SchematicPreviewWidget extends WidgetBase {
 
     private void toggleFullscreen(boolean fullscreen) {
         if (fullscreen) {
-            mc.setScreen(new GuiSchematicPreviewFullscreen(mc.screen, this));
+            mc.gui.setScreen(new GuiSchematicPreviewFullscreen(mc.gui.screen(), this));
         } else {
-            if (mc.screen != null) {
-                mc.screen.onClose();
+            Screen screen = mc.gui.screen();
+            if (screen != null) {
+                screen.onClose();
             }
         }
     }
@@ -347,6 +352,7 @@ public class SchematicPreviewWidget extends WidgetBase {
         private SchematicPreviewRenderer renderer;
         private int lastChunksBuilt;
         private boolean schematicNew;
+        private final Projection projection = new Projection();
         @Nullable
         private ProjectionMatrixBuffer projectionMatrix;
         @Nullable
@@ -435,12 +441,14 @@ public class SchematicPreviewWidget extends WidgetBase {
             if (projectionMatrix == null) {
                 projectionMatrix = new ProjectionMatrixBuffer("SchematicPreview");
             }
-            RenderSystem.setProjectionMatrix(projectionMatrix.getBuffer(new Matrix4f().perspective(
-                    (float) SchematicPreviewConfigs.PREVIEW_FOV.getDoubleValue() * Mth.DEG_TO_RAD,
-                    (float) framebuffer.width / framebuffer.height,
+            projection.setupPerspective(
                     0.05F,
-                    4096.0F
-            )), ProjectionType.PERSPECTIVE);
+                    4096.0F,
+                    (float) SchematicPreviewConfigs.PREVIEW_FOV.getDoubleValue(),
+                    framebuffer.width,
+                    framebuffer.height
+            );
+            RenderSystem.setProjectionMatrix(projectionMatrix.getBuffer(projection), ProjectionType.PERSPECTIVE);
             GpuBuffer previousGlobalUniform = RenderSystem.getGlobalSettingsUniform();
             if (globalUniform == null) {
                 globalUniform = RenderSystem.getDevice().createBuffer(() -> "SchematicPreview Global Settings UBO", 136, GlobalSettingsUniform.UBO_SIZE);
@@ -467,7 +475,7 @@ public class SchematicPreviewWidget extends WidgetBase {
             cameraRenderState.orientation = rotation;
             cameraRenderState.pos = new Vec3(lastRenderPos.x, lastRenderPos.y, lastRenderPos.z);
             cameraRenderState.blockPos = BlockPos.containing(cameraRenderState.pos);
-            mc.gameRenderer.getLighting().setupFor(Lighting.Entry.LEVEL);
+            mc.gameRenderer.lighting().setupFor(Lighting.Entry.LEVEL);
             renderer.prepareRender(cameraRenderState, framebuffer);
             renderer.renderBlocks();
             if (SchematicPreviewConfigs.RENDER_TILE.getBooleanValue()) {
