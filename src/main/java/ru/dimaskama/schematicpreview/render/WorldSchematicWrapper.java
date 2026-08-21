@@ -4,6 +4,7 @@ import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableMap;
 import fi.dy.masa.litematica.schematic.LitematicaSchematic;
 import fi.dy.masa.litematica.schematic.container.LitematicaBlockStateContainer;
+import fi.dy.masa.malilib.util.data.tag.converter.DataConverterNbt;
 import net.minecraft.client.ClientClockManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -128,7 +129,7 @@ public class WorldSchematicWrapper extends Level implements LightChunkGetter, Bl
             schematic.getBlockEntityMapForRegion(region).forEach((relPos, nbtCompound) -> {
                 BlockPos pos = relPos.offset(shift);
                 blockEntitiesBuilder.put(pos, Suppliers.memoize(() -> {
-                    BlockEntity blockEntity = silentCreateTileFromNbt(pos, getBlockState(pos), nbtCompound, registryAccess());
+                    BlockEntity blockEntity = silentCreateTileFromNbt(pos, getBlockState(pos), DataConverterNbt.toVanillaCompound(nbtCompound), registryAccess());
                     if (blockEntity != null) {
                         blockEntity.setLevel(this);
                     }

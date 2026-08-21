@@ -1,1 +1,1 @@
-Minecraft 26.1.2 update
+Update to newest Litematica version
