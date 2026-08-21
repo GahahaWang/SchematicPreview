@@ -1,1 +1,1 @@
-Update to newest Litematica version
+Update to the newest Litematica version
